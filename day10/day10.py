@@ -1,6 +1,9 @@
 from dataclasses import dataclass
 from collections import deque
 
+import numpy as np
+from tqdm import tqdm
+
 
 @dataclass
 class Machine:
@@ -79,11 +82,46 @@ def turn_on_lights(machine: Machine):
     raise ValueError("All-on state is unreachable")
 
 
+def get_to_joltage(machine: Machine):
+    queue = deque()
+    visited = set()
+    
+    target = np.array(machine.joltage_req)
+    schematics_np = [np.array(s) for s in machine.schematics]
+    for schematic in schematics_np:
+        queue.append((np.array([0 for _ in range(len(target))]), schematic, 1))
+    
+    while queue:
+        joltage, schematic, presses = queue.popleft()
+        new_joltage = joltage.copy()
+        new_joltage[schematic] += 1
+        new_joltage_t = tuple(new_joltage)
+        
+        if new_joltage_t in visited:
+            continue
+        visited.add(new_joltage_t)
+        
+        if np.any(new_joltage > target):
+            continue
+        
+        if np.all(new_joltage == target):
+            print(new_joltage)
+            return presses
+        
+        for new_schematic in schematics_np:
+            queue.append((new_joltage, new_schematic, presses + 1))
+    
+    raise ValueError("Target joltage is unreachable")
+
+
 def main():
     machines = parse()
 
     part_1 = sum(turn_on_lights(machine) for machine in machines)
     print(f"Part 1: {part_1}")
+    
+    part_2 = sum(get_to_joltage(machine) for machine in tqdm(machines))
+    print(f"Part 2: {part_2}")
     
 
 if __name__ == "__main__":
