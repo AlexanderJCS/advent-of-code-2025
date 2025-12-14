@@ -176,7 +176,7 @@ def rect_areas(
         
         # Check left and right edges (skip corners already checked)
         if is_valid:
-            for y in range(ymin + 1, ymax):  # Skip corners
+            for y in range(ymin, ymax + 1):  # Skip corners
                 if is_valid:
                     p0 = ti.Vector([ti.f32(xmin), ti.f32(y)])
                     if not point_in_polygon(p0, poly_verts, poly_tris):
@@ -225,7 +225,7 @@ def main():
     
     # Process in chunks
     total_pairs = len(pair_iter)
-    chunk_size = max(1, total_pairs // 100)
+    chunk_size = max(1, total_pairs // 25)
     num_chunks = (total_pairs + chunk_size - 1) // chunk_size  # Ceiling division
     
     print(f"Processing {total_pairs} pairs in {num_chunks} chunks of ~{chunk_size} pairs each")
