@@ -1,5 +1,5 @@
 import itertools
-from tqdm import tqdm
+import time
 
 import numpy as np
 import taichi as ti
@@ -137,6 +137,56 @@ def valid_rect(
 def rect_area(r0, r1):
     return (abs(r1[0] - r0[0]) + 1) * (abs(r1[1] - r0[1]) + 1)
 
+
+@ti.kernel
+def rect_areas(
+        results: ti.types.ndarray(dtype=ti.i32),
+        pairs: ti.types.ndarray(dtype=ti.i32, ndim=2),
+        poly_verts: ti.types.ndarray(dtype=ti.i32, ndim=2),
+        poly_tris: ti.types.ndarray(dtype=ti.i32, ndim=2)
+):
+    for i in range(pairs.shape[0]):
+        r0 = ti.Vector([poly_verts[pairs[i, 0], 0], poly_verts[pairs[i, 0], 1]])
+        r1 = ti.Vector([poly_verts[pairs[i, 1], 0], poly_verts[pairs[i, 1], 1]])
+        
+        xmin = ti.min(r0[0], r1[0])
+        xmax = ti.max(r0[0], r1[0])
+        
+        ymin = ti.min(r0[1], r1[1])
+        ymax = ti.max(r0[1], r1[1])
+        
+        is_valid = True
+        for x in range(xmin, xmax + 1):
+            p0 = ti.Vector([x, ymin])
+            p1 = ti.Vector([x, ymax])
+            
+            if not point_in_polygon(p0, poly_verts, poly_tris):
+                is_valid = False
+                break
+            
+            if not point_in_polygon(p1, poly_verts, poly_tris):
+                is_valid = False
+                break
+        
+        if is_valid:
+            for y in range(ymin, ymax + 1):
+                p0 = ti.Vector([xmin, y])
+                p1 = ti.Vector([xmax, y])
+                
+                if not point_in_polygon(p0, poly_verts, poly_tris):
+                    is_valid = False
+                    break
+                
+                if not point_in_polygon(p1, poly_verts, poly_tris):
+                    is_valid = False
+                    break
+        
+        results[i] = ti.select(
+            is_valid,
+            (abs(r1[0] - r0[0]) + 1) * (abs(r1[1] - r0[1]) + 1),
+            0
+        )
+        
     
 def main():
     with open("input.txt") as f:
@@ -147,36 +197,40 @@ def main():
         coords.append(list(map(int, coord_txt.split(","))))
     
     coords = np.array(coords)
-    triangles = ear_clipping(coords)
     
-    coords_ti = ti.ndarray(dtype=ti.f32, shape=coords.shape)
+    print("Starting ear clipping...")
+    ear_clipping_start = time.perf_counter()
+    triangles = ear_clipping(coords)
+    ear_clipping_end = time.perf_counter()
+    print(f"Ear clipping completed in {ear_clipping_end - ear_clipping_start:.2f} s")
+    
+    kernel_setup_start = time.perf_counter()
+    
+    coords_ti = ti.ndarray(dtype=ti.i32, shape=coords.shape)
     coords_ti.from_numpy(coords)
     
     triangles_ti = ti.ndarray(dtype=ti.int32, shape=triangles.shape)
     triangles_ti.from_numpy(triangles)
     
+    pair_iter = np.array(list(itertools.combinations(range(len(coords)), 2)), dtype=np.int32)
+    pair_iter = pair_iter[0:1000]
+    pair_ti = ti.ndarray(shape=pair_iter.shape, dtype=ti.int32)
+    pair_ti.from_numpy(pair_iter)
     
-    num_pairs = len(coords) * (len(coords) - 1) // 2
+    results = ti.ndarray(dtype=ti.int32, shape=len(pair_iter))
     
-    max_area = 0
-    pair_iter = itertools.combinations(range(len(coords)), 2)
+    kernel_setup_end = time.perf_counter()
+    print(f"Kernel setup time: {kernel_setup_end - kernel_setup_start:.2f}")
     
-    for i0, i1 in tqdm(pair_iter, total=num_pairs):
-        r0 = coords[i0]
-        r1 = coords[i1]
-        
-        edges = edges_of_rect(r0, r1)
-        edges_ti = ti.ndarray(dtype=ti.f32, shape=edges.shape)
-        edges_ti.from_numpy(edges)
-        
-        if not valid_rect(edges_ti, coords_ti, triangles_ti):
-            continue
-        
-        area = rect_area(r0, r1)
-        if area > max_area:
-            max_area = area
+    kernel_start = time.perf_counter()
+    rect_areas(results, pair_ti, coords_ti, triangles_ti)
+    ti.sync()
+    kernel_end = time.perf_counter()
     
-    print(f"Part 2: {max_area}")
+    print(f"Kernel runtime: {kernel_end - kernel_start:.2f}")
+    
+    part_2 = results.to_numpy().max()
+    print(f"Part 2: {part_2}")
 
 
 if __name__ == "__main__":
