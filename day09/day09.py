@@ -4,6 +4,8 @@ import time
 import numpy as np
 import taichi as ti
 
+from tqdm import tqdm
+
 
 def sign(v0, v1, v2):
     return (v0[0] - v2[0]) * (v1[1] - v2[1]) - (v1[0] - v2[0]) * (v0[1] - v2[1])
@@ -87,16 +89,17 @@ def point_in_polygon(
 ):
     hit = False
     for t in range(poly_tris.shape[0]):
-        i0 = poly_tris[t, 0]
-        i1 = poly_tris[t, 1]
-        i2 = poly_tris[t, 2]
+        if not hit:  # Early exit optimization
+            i0 = poly_tris[t, 0]
+            i1 = poly_tris[t, 1]
+            i2 = poly_tris[t, 2]
 
-        v0 = ti.Vector([poly_verts[i0, 0], poly_verts[i0, 1]])
-        v1 = ti.Vector([poly_verts[i1, 0], poly_verts[i1, 1]])
-        v2 = ti.Vector([poly_verts[i2, 0], poly_verts[i2, 1]])
+            v0 = ti.Vector([poly_verts[i0, 0], poly_verts[i0, 1]])
+            v1 = ti.Vector([poly_verts[i1, 0], poly_verts[i1, 1]])
+            v2 = ti.Vector([poly_verts[i2, 0], poly_verts[i2, 1]])
 
-        if point_in_triangle_parallel(pt, v0, v1, v2):
-            hit = True
+            if point_in_triangle_parallel(pt, v0, v1, v2):
+                hit = True
 
     return hit
 
@@ -146,44 +149,47 @@ def rect_areas(
         poly_tris: ti.types.ndarray(dtype=ti.i32, ndim=2)
 ):
     for i in range(pairs.shape[0]):
-        r0 = ti.Vector([poly_verts[pairs[i, 0], 0], poly_verts[pairs[i, 0], 1]])
-        r1 = ti.Vector([poly_verts[pairs[i, 1], 0], poly_verts[pairs[i, 1], 1]])
+        r0_x = poly_verts[pairs[i, 0], 0]
+        r0_y = poly_verts[pairs[i, 0], 1]
+        r1_x = poly_verts[pairs[i, 1], 0]
+        r1_y = poly_verts[pairs[i, 1], 1]
         
-        xmin = ti.min(r0[0], r1[0])
-        xmax = ti.max(r0[0], r1[0])
+        xmin = ti.min(r0_x, r1_x)
+        xmax = ti.max(r0_x, r1_x)
         
-        ymin = ti.min(r0[1], r1[1])
-        ymax = ti.max(r0[1], r1[1])
+        ymin = ti.min(r0_y, r1_y)
+        ymax = ti.max(r0_y, r1_y)
         
         is_valid = True
-        for x in range(xmin, xmax + 1):
-            p0 = ti.Vector([x, ymin])
-            p1 = ti.Vector([x, ymax])
-            
-            if not point_in_polygon(p0, poly_verts, poly_tris):
-                is_valid = False
-                break
-            
-            if not point_in_polygon(p1, poly_verts, poly_tris):
-                is_valid = False
-                break
         
-        if is_valid:
-            for y in range(ymin, ymax + 1):
-                p0 = ti.Vector([xmin, y])
-                p1 = ti.Vector([xmax, y])
-                
+        # Check top and bottom edges (avoiding duplicate corner checks)
+        for x in range(xmin, xmax + 1):
+            if is_valid:
+                p0 = ti.Vector([ti.f32(x), ti.f32(ymin)])
                 if not point_in_polygon(p0, poly_verts, poly_tris):
                     is_valid = False
-                    break
-                
+            
+            if is_valid and ymin != ymax:  # Avoid checking same point twice
+                p1 = ti.Vector([ti.f32(x), ti.f32(ymax)])
                 if not point_in_polygon(p1, poly_verts, poly_tris):
                     is_valid = False
-                    break
+        
+        # Check left and right edges (skip corners already checked)
+        if is_valid:
+            for y in range(ymin + 1, ymax):  # Skip corners
+                if is_valid:
+                    p0 = ti.Vector([ti.f32(xmin), ti.f32(y)])
+                    if not point_in_polygon(p0, poly_verts, poly_tris):
+                        is_valid = False
+                
+                if is_valid and xmin != xmax:  # Avoid checking same point twice
+                    p1 = ti.Vector([ti.f32(xmax), ti.f32(y)])
+                    if not point_in_polygon(p1, poly_verts, poly_tris):
+                        is_valid = False
         
         results[i] = ti.select(
             is_valid,
-            (abs(r1[0] - r0[0]) + 1) * (abs(r1[1] - r0[1]) + 1),
+            (ti.abs(r1_x - r0_x) + 1) * (ti.abs(r1_y - r0_y) + 1),
             0
         )
         
@@ -202,7 +208,7 @@ def main():
     ear_clipping_start = time.perf_counter()
     triangles = ear_clipping(coords)
     ear_clipping_end = time.perf_counter()
-    print(f"Ear clipping completed in {ear_clipping_end - ear_clipping_start:.2f} s")
+    print(f"Ear clipping completed in {ear_clipping_end - ear_clipping_start:.2f}s")
     
     kernel_setup_start = time.perf_counter()
     
@@ -213,23 +219,42 @@ def main():
     triangles_ti.from_numpy(triangles)
     
     pair_iter = np.array(list(itertools.combinations(range(len(coords)), 2)), dtype=np.int32)
-    pair_iter = pair_iter[0:1000]
-    pair_ti = ti.ndarray(shape=pair_iter.shape, dtype=ti.int32)
-    pair_ti.from_numpy(pair_iter)
-    
-    results = ti.ndarray(dtype=ti.int32, shape=len(pair_iter))
     
     kernel_setup_end = time.perf_counter()
-    print(f"Kernel setup time: {kernel_setup_end - kernel_setup_start:.2f}")
+    print(f"Kernel setup time: {kernel_setup_end - kernel_setup_start:.2f}s")
+    
+    # Process in chunks
+    total_pairs = len(pair_iter)
+    chunk_size = max(1, total_pairs // 100)
+    num_chunks = (total_pairs + chunk_size - 1) // chunk_size  # Ceiling division
+    
+    print(f"Processing {total_pairs} pairs in {num_chunks} chunks of ~{chunk_size} pairs each")
+    
+    all_results = np.zeros(total_pairs, dtype=np.int32)
     
     kernel_start = time.perf_counter()
-    rect_areas(results, pair_ti, coords_ti, triangles_ti)
-    ti.sync()
+    
+    for chunk_idx in tqdm(range(num_chunks)):
+        start_idx = chunk_idx * chunk_size
+        end_idx = min(start_idx + chunk_size, total_pairs)
+        
+        chunk_pairs = pair_iter[start_idx:end_idx]
+        
+        pair_ti = ti.ndarray(shape=chunk_pairs.shape, dtype=ti.int32)
+        pair_ti.from_numpy(chunk_pairs)
+        
+        results = ti.ndarray(dtype=ti.int32, shape=len(chunk_pairs))
+        
+        rect_areas(results, pair_ti, coords_ti, triangles_ti)
+        ti.sync()
+        
+        all_results[start_idx:end_idx] = results.to_numpy()
+
     kernel_end = time.perf_counter()
     
-    print(f"Kernel runtime: {kernel_end - kernel_start:.2f}")
+    print(f"Kernel runtime: {kernel_end - kernel_start:.2f}s")
     
-    part_2 = results.to_numpy().max()
+    part_2 = all_results.max()
     print(f"Part 2: {part_2}")
 
 
