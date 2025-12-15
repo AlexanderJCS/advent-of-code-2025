@@ -39,47 +39,75 @@ def point_in_triangle_parallel(pt, v0, v1, v2):
     return not (has_neg and has_pos)
 
 
+def signed_area(poly):
+    x = poly[:, 0]
+    y = poly[:, 1]
+    return 0.5 * np.sum(x * np.roll(y, -1) - y * np.roll(x, -1))
+
+
 def ear_clipping(vertices: np.ndarray):
-    indices = [i for i in range(len(vertices))]
+    # Ensure counter-clockwise winding
+    if signed_area(vertices) < 0:
+        vertices = vertices[::-1]
+    
+    indices = list(range(len(vertices)))
     triangles = []
     
     while len(indices) > 3:
-        verts_left = vertices[indices]
+        ear_found = False
         
-        prev_verts = np.roll(verts_left, 1, axis=0)
-        next_verts = np.roll(verts_left, -1, axis=0)
-        to_prev = verts_left - prev_verts
-        to_next = verts_left - next_verts
-        
-        convex = (to_prev[:, 0] * to_next[:, 1] - to_prev[:, 1] * to_next[:, 0])
-        
-        i0 = np.argmax(convex > 0)
-        i1 = (i0 - 1) % len(verts_left)
-        i2 = (i0 + 1) % len(verts_left)
-        
-        v0 = verts_left[i0]
-        v1 = verts_left[i1]
-        v2 = verts_left[i2]
-        
-        for j, idx in enumerate(indices):
-            if j in (i0, i1, i2):
+        for i in range(len(indices)):
+            # Get three consecutive vertices
+            i_prev = (i - 1) % len(indices)
+            i_next = (i + 1) % len(indices)
+            
+            idx_prev = indices[i_prev]
+            idx_curr = indices[i]
+            idx_next = indices[i_next]
+            
+            v_prev = vertices[idx_prev]
+            v_curr = vertices[idx_curr]
+            v_next = vertices[idx_next]
+            
+            # Check if this vertex is convex (forms a left turn)
+            edge1 = v_curr - v_prev
+            edge2 = v_next - v_curr
+            cross = edge1[0] * edge2[1] - edge1[1] * edge2[0]
+            
+            if cross <= 0:  # Reflex or collinear vertex, skip
                 continue
             
-            if point_in_triangle(vertices[idx], v0, v1, v2):
+            # Check if any other vertex is inside this triangle
+            is_ear = True
+            for j, idx_test in enumerate(indices):
+                if j in (i_prev, i, i_next):
+                    continue
+                
+                if point_in_triangle(vertices[idx_test], v_prev, v_curr, v_next):
+                    is_ear = False
+                    break
+            
+            if is_ear:
+                # Found a valid ear, clip it
+                triangles.append((idx_prev, idx_curr, idx_next))
+                indices.pop(i)
+                ear_found = True
                 break
         
-        else:  # no points in triangle
-            triangles.append((
-                indices[i0],
-                indices[i1],
-                indices[i2]
-            ))
-            del indices[i0]
+        if not ear_found:
+            # Fallback: this shouldn't happen with valid polygons
+            # but if it does, just take the first convex vertex
+            print("Warning: No ear found, forcing triangle removal")
+            if len(indices) >= 3:
+                triangles.append((indices[0], indices[1], indices[2]))
+                indices.pop(1)
+            else:
+                break
     
-    triangles.append(tuple(indices))  # there are 3 indices left
+    if len(indices) == 3:
+        triangles.append(tuple(indices))
     
     return np.array(triangles)
-
 
 @ti.func
 def point_in_polygon(
@@ -143,7 +171,7 @@ def rect_area(r0, r1):
 
 @ti.kernel
 def rect_areas(
-        results: ti.types.ndarray(dtype=ti.i32),
+        results: ti.types.ndarray(dtype=ti.i64),
         pairs: ti.types.ndarray(dtype=ti.i32, ndim=2),
         poly_verts: ti.types.ndarray(dtype=ti.i32, ndim=2),
         poly_tris: ti.types.ndarray(dtype=ti.i32, ndim=2)
@@ -189,7 +217,7 @@ def rect_areas(
         
         results[i] = ti.select(
             is_valid,
-            (ti.abs(r1_x - r0_x) + 1) * (ti.abs(r1_y - r0_y) + 1),
+            ti.int64((ti.abs(ti.cast(r1_x, ti.int64) - ti.cast(r0_x, ti.int64)) + 1) * (ti.abs(ti.cast(r1_y, ti.int64) - ti.cast(r0_y, ti.int64)) + 1)),
             0
         )
         
@@ -225,12 +253,12 @@ def main():
     
     # Process in chunks
     total_pairs = len(pair_iter)
-    chunk_size = max(1, total_pairs // 25)
+    chunk_size = max(1, total_pairs // 1)
     num_chunks = (total_pairs + chunk_size - 1) // chunk_size  # Ceiling division
     
     print(f"Processing {total_pairs} pairs in {num_chunks} chunks of ~{chunk_size} pairs each")
     
-    all_results = np.zeros(total_pairs, dtype=np.int32)
+    all_results = np.zeros(total_pairs, dtype=np.int64)
     
     kernel_start = time.perf_counter()
     
@@ -243,7 +271,7 @@ def main():
         pair_ti = ti.ndarray(shape=chunk_pairs.shape, dtype=ti.int32)
         pair_ti.from_numpy(chunk_pairs)
         
-        results = ti.ndarray(dtype=ti.int32, shape=len(chunk_pairs))
+        results = ti.ndarray(dtype=ti.int64, shape=len(chunk_pairs))
         
         rect_areas(results, pair_ti, coords_ti, triangles_ti)
         ti.sync()
