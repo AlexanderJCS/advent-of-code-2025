@@ -1,8 +1,9 @@
 from dataclasses import dataclass
 from collections import deque
 
-import numpy as np
 from tqdm import tqdm
+
+import z3
 
 
 @dataclass
@@ -83,35 +84,29 @@ def turn_on_lights(machine: Machine):
 
 
 def get_to_joltage(machine: Machine):
-    queue = deque()
-    visited = set()
+    target = machine.joltage_req
     
-    target = np.array(machine.joltage_req)
-    schematics_np = [np.array(s) for s in machine.schematics]
-    for schematic in schematics_np:
-        queue.append((np.array([0 for _ in range(len(target))]), schematic, 1))
+    buttons = []
+    for button in machine.schematics:
+        buttons.append([
+            1 if i in button else 0
+            for i in range(len(target))
+        ])
     
-    while queue:
-        joltage, schematic, presses = queue.popleft()
-        new_joltage = joltage.copy()
-        new_joltage[schematic] += 1
-        new_joltage_t = tuple(new_joltage)
-        
-        if new_joltage_t in visited:
-            continue
-        visited.add(new_joltage_t)
-        
-        if np.any(new_joltage > target):
-            continue
-        
-        if np.all(new_joltage == target):
-            print(new_joltage)
-            return presses
-        
-        for new_schematic in schematics_np:
-            queue.append((new_joltage, new_schematic, presses + 1))
+    opt = z3.Optimize()
     
-    raise ValueError("Target joltage is unreachable")
+    button_ints = [z3.Int(f"b{i}") for i in range(len(buttons))]
+    for button_int in button_ints:
+        opt.add(button_int >= 0)
+    
+    for i in range(len(target)):
+        opt.add(z3.Sum(button_ints[k] * buttons[k][i] for k in range(len(buttons))) == target[i])
+    
+    opt.minimize(z3.Sum(button_ints))
+    opt.check()
+    model = opt.model()
+    
+    return sum(model[button_int].as_long() for button_int in button_ints)
 
 
 def main():
